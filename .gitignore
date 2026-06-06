@@ -1,3 +1,11 @@
+outputs/*.json
+data/labels.csv
+pdfs/
+*.pdf
+__pycache__/
+*.pyc
+.env
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
