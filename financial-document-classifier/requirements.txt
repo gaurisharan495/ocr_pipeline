@@ -1,7 +1,7 @@
 paddleocr
+paddlepaddle
 pypdfium2
 numpy
-scikit-learn
 fuzzywuzzy
 python-Levenshtein
 pandas
