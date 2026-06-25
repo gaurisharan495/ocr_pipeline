@@ -1,224 +1,284 @@
-# Document Classification Pipeline — Key Details
+# Financial Document Classification Pipeline
+
+An automated pipeline that classifies scanned PDF pages containing
+multiple financial documents into their respective document types.
+Runs 100% locally — no data is transmitted externally at any stage.
 
 ---
 
-## What The Pipeline Does
+## Accuracy
+
+| Metric | Value |
+|---|---|
+| **Overall Accuracy** | **91.5%** |
+| Total Pages Evaluated | 233 |
+| Total PDFs | 29 |
+| Document Types | 26 |
+
+### Accuracy By Tier
+
+| Tier | Correct/Total | Accuracy |
+|---|---|---|
+| Tier 1 — Title Matching | 144/149 | 96.6% |
+| Tier 3 — Keyword Scoring | 30/31 | 96.8% |
+| Pre-check | 25/25 | 100.0% |
+| None (inherited) | 15/29 | 51.7% |
+
+---
+
+## What It Does
 
 Takes scanned PDFs containing multiple financial documents compiled
-together and identifies which pages belong to which document type,
-outputting segment boundaries like:
-"Tax Invoice: Pages 1–2 | E-Way Bill: Page 3 | Purchase Order: Pages 4–5"
+together and identifies which pages belong to which document type.
+
+**Example Output:**
+```
+PDF_24 | Pages 1–2 : Tax Invoice
+PDF_24 | Page 3    : E-Way Bill
+PDF_24 | Pages 4–5 : Purchase Order
+PDF_24 | Page 6    : AP Tracker
+PDF_24 | Page 7    : Goods Receipt Note
+```
 
 ---
 
-## Document Types Classified (12 Categories)
+## Document Types Supported (26 Categories)
 
-| Label | Document Type |
-|---|---|
-| tax_invoice | Tax Invoice |
-| eway_bill | E-Way Bill |
-| purchase_order | Purchase Order |
-| qcr_finished_goods | Quality Check Report — Finished Goods |
-| goods_receipt_note | Goods Receipt Note (GRN) |
-| job_work_order | Job Work Order |
-| snag_list_certificate | Snag List Certificate |
-| invoice_cash_memo | Invoice / Cash Memo |
-| ap_tracker | Accounts Payable Tracker |
-| credit_note | Credit Note |
-| delivery_challan | Delivery Challan |
-| manual_delivery_receipt | Manual Delivery Receipt / Proof of Delivery |
-
----
-
-## Libraries Used
-
-| Library | Purpose | Local/Online |
-|---|---|---|
-| paddleocr | OCR — extracts text and bounding boxes from page images | Local after first model download |
-| pypdfium2 | Converts PDF pages to images — no Poppler needed | Local |
-| numpy | Image array conversion for PaddleOCR | Local |
-| scikit-learn | ML utilities | Local |
-| fuzzywuzzy | Fuzzy string matching for keyword detection | Local |
-| python-Levenshtein | Speed boost for fuzzywuzzy | Local |
-| pandas | CSV label loading and evaluation | Local |
-| re | Regex pattern matching | Built-in |
-| json | Saving/loading OCR results | Built-in |
-
-Zero data sent externally at any stage. All processing on local machine.
+| # | Document Type | # | Document Type |
+|---|---|---|---|
+| 1 | Tax Invoice | 14 | Inspection Checklist |
+| 2 | E-Way Bill | 15 | Service Completion Slip |
+| 3 | Purchase Order | 16 | Import Receipt |
+| 4 | Goods Receipt Note | 17 | Payment Receipt |
+| 5 | Credit Note | 18 | Insurance Certificate |
+| 6 | Job Work Order | 19 | Bill |
+| 7 | Back Page | 20 | Undertaking |
+| 8 | AP Tracker | 21 | Consignment Bond |
+| 9 | Packing List | 22 | Challan |
+| 10 | QCR Finished Goods | 23 | Bill of Lading |
+| 11 | Receipt | 24 | Invoice |
+| 12 | Manual Delivery Receipt | 25 | Bill of Entry |
+| 13 | Commission Working | 26 | Weighbridge Ticket |
 
 ---
 
 ## Pipeline Architecture
 
-### OCR Pipeline (ocr_pipeline.py)
-- Converts each PDF page to a 300 DPI image using pypdfium2
-- Runs PaddleOCR on each page image
-- Extracts per page:
-  - full_text: all words joined and lowercased
-  - header_text: first 15 words (title zone)
-  - word_count: total words found
-  - low_confidence flag: True if fewer than 20 words found
-  - text_blocks: list of {text, x, y, width, height, confidence}
-    per detected text region — used for layout analysis
-  - page_width and page_height in pixels
-- Saves everything to outputs/ocr_results.json
-- Only needs to run once — results reused by all other scripts
-
----
-
-### Approach A — Keyword Scoring Classifier (classifier.py)
-Accuracy: 84.8% on 34 labeled pages
-
-How it works:
-1. Loads OCR results from ocr_results.json
-2. For each page, scores it against all 12 document categories
-3. Keywords found in header zone (top 15 words) score 3x
-4. Keywords found in body text score 1x
-5. Negative keywords (rival document words) apply -2 penalty
-6. Fuzzy matching handles OCR typos and partial matches
-7. Highest scoring category wins
-8. Inheritance logic: pages with too few words (<10) inherit
-   the label of the previous confidently classified page
-9. Position-aware override: if two scores are very close and
-   the page is in the same document family as the previous page,
-   it inherits the previous label
-10. Groups consecutive same-label pages into document segments
-
-Key components:
-- KEYWORDS dict: positive keywords per document type
-- NEGATIVE_KEYWORDS dict: penalises rival document words
-- fuzzy_match_keyword(): handles OCR errors and partial matches
-- score_document(): scores a page against all categories
-- predict_page(): returns predicted label and confidence
-- apply_inheritance(): handles low-word-count continuation pages
-- group_pages_into_documents(): merges consecutive same-label pages
-
----
-
-### Approach B — Boundary Detection + Classifier (boundary_detector.py + pipeline_b.py)
-
-Fundamental difference from Approach A:
-Approach A classifies each page independently then groups them.
-Approach B finds where documents start and end FIRST, then
-classifies each complete segment as one unit using combined text.
-
-Pass 1 — Boundary Detection:
-Determines which pages start a new document using three signals
-in priority order:
-
-Signal 1 — Document Title in Title Zone (strongest)
-  Looks at text in top 20% of page using bounding box coordinates
-  Matches against known document title phrases
-  Exact phrase match → 0.90 confidence → new document declared
-  Only multi-word specific phrases used (no single generic words)
-
-Signal 2 — Definitive Regex Patterns
-  Structural identifiers unique to specific document types:
-  - GSTIN number (15-char alphanumeric) → Tax Invoice
-  - EWB number → E-Way Bill
-  - GRN number → Goods Receipt Note
-  - Vehicle number pattern → E-Way Bill
-  - PO number pattern → Purchase Order
-  - JWO number pattern → Job Work Order
-  - Challan number pattern → Delivery Challan
-  - Column headers (ord qty, recd qty) → AP Tracker
-  Pattern found + different type from previous → new document
-
-Signal 3 — Document Reference Number
-  Generic document number pattern (INV/, GRN-, PO/, DC/)
-  Found in title zone or first 200 chars → likely new document
-
-Decision rules:
-  < 10 words → continuation (not enough text to classify)
-  Title found → new document (unless same type + no doc number)
-  Pattern found + different type → new document
-  Doc number found → likely new document
-  Nothing found → continuation of previous document
-
-Pass 2 — Segment Classification:
-  For each segment found in Pass 1, combines ALL page text
-  into one string then classifies using three tiers:
-  Tier 1: Definitive regex patterns on combined text
-  Tier 2: Trust boundary detector if title confidence >= 0.88
-  Tier 3: Keyword presence scoring on combined text
-           (presence not count — avoids inflation from long text)
-           Header keywords from first page worth 3x
-
-Why combined text is better:
-  A 3-page job work order classified as one unit has 3x more
-  signal than classifying page 2 alone. OCR errors on one page
-  are diluted. Continuation pages contribute their text.
+```
+SCANNED PDF
+      ↓
+┌─────────────────────────────────────┐
+│         STAGE 1 — OCR               │
+│  PaddleOCR extracts per page:       │
+│  • Full text (lowercased)           │
+│  • Bounding box coordinates         │
+│  • Word count                       │
+│  • Page dimensions                  │
+│  • OCR confidence scores            │
+│  Saved to: outputs/ocr_results.json │
+└─────────────────────────────────────┘
+      ↓
+┌─────────────────────────────────────┐
+│    STAGE 2 — THREE TIER CLASSIFIER  │
+│                                     │
+│  PRE-CHECK                          │
+│  ├── Terms & Conditions → cont.     │
+│  ├── Strong title found → not cont. │
+│  └── < 6 words → sparse/back page  │
+│                                     │
+│  TIER 1 — TITLE MATCHER (Priority)  │
+│  ├── Scans top 20% of page          │
+│  │   using bounding box y-coords    │
+│  ├── Matches 26 document titles     │
+│  ├── Longest phrase wins            │
+│  │   ("Tax Invoice" beats "Invoice")│
+│  └── Negative titles block          │
+│       wrong matches                 │
+│                                     │
+│  TIER 3 — KEYWORD SCORING (Fallback)│
+│  ├── Fuzzy keyword matching         │
+│  ├── Header zone = 3x weight        │
+│  └── Handles generic doc types      │
+└─────────────────────────────────────┘
+      ↓
+┌─────────────────────────────────────┐
+│    STAGE 3 — SMART GROUPING         │
+│  • Continuation pages inherit       │
+│    previous label                   │
+│  • Back pages club with previous    │
+│  • Consecutive same-label pages     │
+│    merged into one segment          │
+│  • Segment-level evaluation         │
+│    (back page of eway bill counted  │
+│     correct when grouped with it)   │
+└─────────────────────────────────────┘
+      ↓
+   FINAL OUTPUT
+   Pages X–Y: Document Type
+```
 
 ---
 
 ## Key Design Decisions
 
-1. No AI/LLMs/APIs — everything runs 100% locally
-   Data never leaves the machine at any stage
+### Why Three Tiers?
+Different document types are identified in different ways:
+- **Group 1** — Have their name written at the top (Tax Invoice, E-Way Bill) → Title matching
+- **Group 2** — Generic, identified only by content (Invoice, Bill, Receipt) → Keyword scoring
+- **Group 3** — Continuation pages with no unique identity → Inherit from previous
 
-2. Fuzzy matching (fuzzywuzzy) handles OCR errors
-   "challan" matches "delivery challan" at ~85% similarity
-   "chalan" matches "challan" at ~85% similarity
+Running tiers in order and stopping at first confident answer
+protects reliable signals from being diluted by weaker ones.
 
-3. Header zone gets 3x weight
-   Document titles and key identifiers almost always appear
-   in the top portion of the page
+### Why Bounding Box Coordinates?
+PaddleOCR returns the physical position of every text block on the
+page. Using the y-coordinate, we extract only text from the top 20%
+of the page — the title zone — for Tier 1 matching. This prevents
+body text from interfering with title detection.
 
-4. Negative keywords prevent false positives
-   "invoice" appearing in an AP Tracker column heading
-   no longer causes it to be misclassified as a tax invoice
+### Why Negative Document Titles?
+Some pages have multiple document references at the top. For example
+a Job Work Order page may reference "Challan No: 45" in its header.
+Without negative titles, this would be misclassified as a Challan.
+Negative titles block a match if a rival phrase is also present in
+the title zone.
 
-5. Two separate pipelines preserved
-   Approach A: fast, simple, 84.8% accuracy
-   Approach B: boundary-first, more robust at scale
+### Why Fuzzy Matching?
+OCR on scanned documents introduces errors — "challan" may be read
+as "chalan", "gstin" as "gst1n". Fuzzy matching with 80% similarity
+threshold handles these OCR errors gracefully.
+
+### Smart Evaluation
+Back pages and continuation pages are evaluated at segment level.
+A back page correctly grouped with its parent document is counted
+as correct, reflecting real-world output accuracy honestly.
 
 ---
 
-## File Structure
+## Tech Stack
 
+| Library | Version | Purpose |
+|---|---|---|
+| paddleocr | Latest | OCR engine — fully local |
+| pypdfium2 | Latest | PDF to image — no Poppler needed |
+| numpy | Latest | Image array processing |
+| fuzzywuzzy | Latest | Fuzzy string matching |
+| python-Levenshtein | Latest | Speed boost for fuzzywuzzy |
+| pandas | Latest | Label loading and evaluation |
+
+**Python 3.10+**
+
+All libraries run completely offline after initial installation.
+No API calls, no cloud processing, no data transmission.
+
+---
+
+## Project Structure
+
+```
 document_classifier/
-├── pdfs/                    ← input PDFs go here
+│
+├── ocr_pipeline.py          # Stage 1: PDF → OCR text + bboxes
+├── final_pipeline.py        # Stage 2+3: classify + group + output
+│
 ├── outputs/
-│   ├── ocr_results.json     ← generated by ocr_pipeline.py
-│   ├── predictions.json     ← generated by classifier.py
-│   ├── documents.json       ← segment groups from classifier
-│   └── segments.json        ← generated by boundary_detector.py
-├── data/
-│   └── labels.csv           ← manual labels for evaluation
-├── ocr_pipeline.py          ← Stage 1: PDF → OCR text + bboxes
-├── classifier.py            ← Approach A: page-level classifier
-├── boundary_detector.py     ← Approach B: boundary detection
-├── pipeline_b.py            ← Approach B: full combined pipeline
-└── evaluate_boundary.py     ← boundary detection evaluator
+│   ├── ocr_results.json     # OCR output (auto-generated)
+│   ├── final_output.json    # Full classification results
+│   └── final_results.txt    # Human readable segment output
+│
+└── data/
+    └── labels.csv           # Manual labels for evaluation
+                             # (not included — confidential)
+```
 
 ---
 
-## Accuracy Results
+## Installation
 
-| Pipeline | Accuracy |
-|---|---|
-| Approach A — Keyword Classifier | 84.8% on 34 pages |
-| Approach B — Boundary F1 | 90% (Precision 81.8%, Recall 100%) |
-| Approach B — Page Accuracy | In progress |
+```bash
+pip install paddlepaddle
+pip install paddleocr
+pip install pypdfium2
+pip install numpy
+pip install fuzzywuzzy python-Levenshtein
+pip install pandas
+```
 
-Dataset: 34 labeled pages across 5 PDFs
-Document types: 12 categories
+> **Note:** PaddleOCR downloads model files on first run only.
+> After that it operates fully offline.
 
 ---
 
-## How To Run
+## Usage
 
-Step 1 — OCR (run once):
-  python ocr_pipeline.py
+**Step 1 — Place PDFs in a folder named `pdfs/`**
 
-Step 2 — Approach A Classifier:
-  python classifier.py
+**Step 2 — Run OCR (only needs to run once)**
+```bash
+python ocr_pipeline.py
+```
 
-Step 3 — Approach B Boundary Detector:
-  python boundary_detector.py
+**Step 3 — Run classifier**
+```bash
+python final_pipeline.py
+```
 
-Step 4 — Evaluate Boundary Detector:
-  python evaluate_boundary.py
+Results are saved to:
+- `outputs/final_results.txt` — human readable output
+- `outputs/final_output.json` — full JSON with confidence scores
 
-Step 5 — Full Approach B Pipeline:
-  python pipeline_b.py
+---
+
+## Adding New Document Types
+
+To support a new document type:
+
+1. Add its title phrases to `DOCUMENT_TITLES` in `final_pipeline.py`:
+```python
+"new_document_type": ["exact title phrase", "alternative title"]
+```
+
+2. Add keywords to `KEYWORDS`:
+```python
+"new_document_type": ["keyword1", "keyword2", "keyword3"]
+```
+
+3. If any other document type gets confused with it,
+   add negative titles to `NEGATIVE_DOCUMENT_TITLES`:
+```python
+"other_type": ["phrase that means it's not other_type"]
+```
+
+4. Re-run `final_pipeline.py` — no retraining needed.
+
+---
+
+## Data Confidentiality
+
+This repository contains no dataset, PDF files, OCR outputs,
+or label files. All document data is confidential and processed
+exclusively on local machines. The pipeline is designed so that
+no document content ever leaves the processing environment.
+
+---
+
+## Limitations
+
+- Pages with no title and no strong keywords rely on inheritance
+  from the previous page (51.7% accuracy on these pages)
+- Handwritten pages may have poor OCR quality
+- Heavily degraded scans may reduce OCR confidence
+- New document types require manual addition of title phrases
+
+---
+
+## Development Journey
+
+| Stage | Accuracy | Notes |
+|---|---|---|
+| Approach A — Keyword Scorer | 81.8% | 34 pages, 12 doc types |
+| Approach A — Tuned | 84.8% | Refined keywords, fuzzy matching |
+| Final Pipeline v1 | 72.1% | Scaled to 233 pages, 26 doc types |
+| Final Pipeline v2 | 73.8% | Pre-check improvements |
+| Final Pipeline v3 | 85.4% | Smart evaluation, negative titles |
+| **Final Pipeline v4** | **91.5%** | **Negative document titles, fixes** |
